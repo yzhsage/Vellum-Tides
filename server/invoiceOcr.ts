@@ -1,4 +1,3 @@
-import { invokeLLM } from "./_core/llm";
 import { validateExtractedInvoice } from "../shared/ledger";
 
 const SYSTEM_INSTRUCTION = "你是臺灣發票影像轉寫與初步歸類助手。僅讀取可見文字，不可杜撰不存在的品項、金額或發票欄位。逐項保留可辨識的品名與金額；辨識不清處請以空字串或 0 表示。每一項必須依品名選一個大目：food=吃喝食材、home=日用品水電網路、transport=交通油資、culture=園藝水族玩具旅遊興趣、misc=醫療手續費與其他。tags 僅在品名明確顯示專案／興趣時建議 0 至 2 個 #開頭的繁體中文符契，否則輸出空陣列。金額只輸出整數新臺幣；日期以 YYYY-MM-DD 輸出；結果必須符合 JSON schema。";
@@ -40,8 +39,9 @@ export async function extractInvoiceFromImage(imageDataUrl: string) {
     throw new Error("觀圖析字尚未設定 GEMINI_API_KEY，請改用鏡觀條印或手動品項輸入。");
   }
 
-  const [header, imageData] = imageDataUrl.split(",", 2);
-  const mimeType = header?.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64$/)?.[1];
+  const imageMatch = imageDataUrl.match(/^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/]+={0,2})$/);
+  const mimeType = imageMatch?.[1];
+  const imageData = imageMatch?.[2];
   if (!mimeType || !imageData) {
     throw new Error("影像資料格式無法辨識，請重新選取照片。");
   }
@@ -71,12 +71,18 @@ export async function extractInvoiceFromImage(imageDataUrl: string) {
   });
 
   if (!response.ok) {
-    throw new Error(`觀圖析字服務暫時無法回應（${response.status}），請改用手動品項輸入。`);
+    const detail = (await response.text()).replace(/\s+/g, " ").slice(0, 180);
+    throw new Error(`觀圖析字服務暫時無法回應（${response.status}${detail ? `：${detail}` : ""}），請改用手動品項輸入。`);
   }
 
   const result = await response.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
   const raw = result.candidates?.[0]?.content?.parts?.find(part => typeof part.text === "string")?.text;
-  const parsed = typeof raw === "string" ? validateExtractedInvoice(JSON.parse(raw)) : null;
+  let parsed = null;
+  try {
+    parsed = typeof raw === "string" ? validateExtractedInvoice(JSON.parse(raw)) : null;
+  } catch {
+    parsed = null;
+  }
   if (!parsed) throw new Error("影像辨識結果格式不完整，請改用手動品項輸入。");
   return parsed;
 }
