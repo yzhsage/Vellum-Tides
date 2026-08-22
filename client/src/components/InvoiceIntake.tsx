@@ -79,6 +79,7 @@ function displayOcrError(error: unknown) {
     SUPABASE_CONFIG: "觀圖析字的帳本連線尚未就緒，請稍後再試。",
     GEMINI_CONFIG: "觀圖析字尚未設定辨讀金鑰，請檢查正式部署的服務設定。",
     GEMINI_MODEL_UNAVAILABLE: "觀圖析字服務目前沒有可用模型，請確認辨讀服務的 API 已啟用並允許使用模型。",
+    GEMINI_MODEL_CATALOG_UNAVAILABLE: "觀圖析字服務無法讀取可用模型清單，請確認辨讀金鑰允許使用 Gemini API。",
     GEMINI_AUTH: "觀圖析字金鑰沒有模型使用權限，請檢查正式部署的金鑰設定。",
     GEMINI_QUOTA: "觀圖析字服務目前額度已滿，請稍後重試，或先改用手動憑據。",
     GEMINI_UPSTREAM_UNAVAILABLE: "觀圖析字服務暫時無法回應，請稍後重試。",

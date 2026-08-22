@@ -93,22 +93,36 @@ describe("原生觀圖析字 Vercel 函式", () => {
     expect(capture.result().statusCode).toBe(200);
   });
 
-  it("模型列表無可用文字生成模型且穩定備援皆不存在時，回傳可供手機端分類的模型錯誤代碼", async () => {
+  it("模型列表無可用文字生成模型時，不猜測固定模型名稱並回傳可供手機端分類的模型錯誤代碼", async () => {
     vi.stubEnv("VITE_SUPABASE_URL", "https://example.supabase.co");
     vi.stubEnv("VITE_SUPABASE_PUBLISHABLE_KEY", "publishable-test-key");
     vi.stubEnv("GEMINI_API_KEY", "gemini-test-key");
     vi.stubGlobal("fetch", vi.fn()
       .mockResolvedValueOnce(new Response("{}", { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ models: [{ name: "models/gemini-2.0-flash", supportedGenerationMethods: ["generateContent"] }] }), { status: 200 }))
-      .mockResolvedValueOnce(new Response('{"error":{"message":"model not found"}}', { status: 404 }))
-      .mockResolvedValueOnce(new Response('{"error":{"message":"model not found"}}', { status: 404 }))
-      .mockResolvedValueOnce(new Response('{"error":{"message":"model not found"}}', { status: 404 })));
+      .mockResolvedValueOnce(new Response(JSON.stringify({ models: [{ name: "models/gemini-2.0-flash", supportedGenerationMethods: ["generateContent"] }] }), { status: 200 })));
     const capture = createResponse();
 
     await handler({ method: "POST", body: { accessToken: "a".repeat(24), imageDataUrl: "data:image/jpeg;base64,aGVsbG8=" } }, capture.response);
 
     expect(capture.result().statusCode).toBe(502);
     expect(capture.result().body).toMatchObject({ code: "GEMINI_MODEL_UNAVAILABLE" });
+  });
+
+  it("模型清單端點拒絕時保留 API 或金鑰問題，不以不存在的固定模型掩蓋原因", async () => {
+    vi.stubEnv("VITE_SUPABASE_URL", "https://example.supabase.co");
+    vi.stubEnv("VITE_SUPABASE_PUBLISHABLE_KEY", "publishable-test-key");
+    vi.stubEnv("GEMINI_API_KEY", "gemini-test-key");
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response("{}", { status: 200 }))
+      .mockResolvedValueOnce(new Response('{"error":{"message":"API has not been used"}}', { status: 404 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const capture = createResponse();
+
+    await handler({ method: "POST", body: { accessToken: "a".repeat(24), imageDataUrl: "data:image/jpeg;base64,aGVsbG8=" } }, capture.response);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(capture.result().statusCode).toBe(502);
+    expect(capture.result().body).toMatchObject({ code: "GEMINI_MODEL_CATALOG_UNAVAILABLE" });
   });
 
   it("Gemini 額度用盡時回傳獨立代碼而不混同為網站端點 404", async () => {

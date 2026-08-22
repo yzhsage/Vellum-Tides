@@ -10,6 +10,7 @@ type OcrErrorCode =
   | "AUTH_EXPIRED"
   | "GEMINI_CONFIG"
   | "GEMINI_MODEL_UNAVAILABLE"
+  | "GEMINI_MODEL_CATALOG_UNAVAILABLE"
   | "GEMINI_AUTH"
   | "GEMINI_QUOTA"
   | "GEMINI_UPSTREAM_UNAVAILABLE"
@@ -20,7 +21,6 @@ type OcrErrorCode =
 
 const majors = new Set(["food", "home", "transport", "culture", "misc", "salary", "gain", "windfall"]);
 const imageDataUrlPattern = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/]+={0,2})$/;
-const fallbackGeminiModels = ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.5-pro"] as const;
 const geminiModelPriority = ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.5-pro", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"] as const;
 const MAX_SAFE_IMAGE_DATA_URL_LENGTH = 1_800_000;
 const GEMINI_REQUEST_TIMEOUT_MS = 20_000;
@@ -98,6 +98,13 @@ function geminiFailure(res: ResponseLike, status: number) {
   return sendError(res, 502, "GEMINI_REQUEST_REJECTED", `觀圖析字服務拒絕此次請求（${status}），請換一張清晰且完整的憑據照片再試。`);
 }
 
+function geminiCatalogFailure(res: ResponseLike, status: number) {
+  if (status === 401 || status === 403) return sendError(res, 502, "GEMINI_AUTH", "觀圖析字金鑰無法讀取模型清單，請檢查 Vercel 的 GEMINI_API_KEY 權限。");
+  if (status === 429) return sendError(res, 502, "GEMINI_QUOTA", "觀圖析字服務目前額度已滿，請稍後再試或改用手動憑據。");
+  if (status >= 500 || status === 0) return sendError(res, 502, "GEMINI_UPSTREAM_UNAVAILABLE", "觀圖析字服務暫時無法讀取模型清單，請稍後再試或改用手動憑據。");
+  return sendError(res, 502, "GEMINI_MODEL_CATALOG_UNAVAILABLE", `觀圖析字服務無法讀取可用模型清單（${status}）。請確認 GEMINI_API_KEY 所屬專案已啟用 Generative Language API，且該金鑰允許使用 Gemini API。`);
+}
+
 async function fetchGemini(input: string, init: RequestInit) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), GEMINI_REQUEST_TIMEOUT_MS);
@@ -117,18 +124,18 @@ function availableGeminiModels(value: unknown) {
     .filter(name => /^gemini-/.test(name) && !/^gemini-(?:1|2\.0)-/.test(name) && !/(?:-image|live|tts|audio|embedding|computer)/.test(name));
   const visibleSet = new Set(visibleModels);
   const preferred = geminiModelPriority.filter(model => visibleSet.has(model));
-  const additionalFlashModels = visibleModels.filter(model => !preferred.includes(model as typeof preferred[number]) && /flash/i.test(model));
-  return [...preferred, ...additionalFlashModels];
+  const additionalModels = visibleModels.filter(model => !preferred.includes(model as typeof preferred[number]));
+  return [...preferred, ...additionalModels];
 }
 
 async function resolveGeminiModels(geminiKey: string) {
   try {
     const response = await fetchGemini(`https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(geminiKey)}`, { method: "GET" });
-    if (!response.ok) return [...fallbackGeminiModels];
+    if (!response.ok) return { models: [] as string[], status: response.status };
     const discovered = availableGeminiModels(JSON.parse(await response.text()));
-    return discovered.length ? discovered : [...fallbackGeminiModels];
+    return { models: discovered, status: 200 };
   } catch {
-    return [...fallbackGeminiModels];
+    return { models: [] as string[], status: 0 };
   }
 }
 
@@ -162,7 +169,10 @@ export default async function handler(req: RequestLike, res: ResponseLike) {
       ] }],
       generationConfig: { responseMimeType: "application/json", temperature: 0.1 },
     });
-    const geminiModels = await resolveGeminiModels(geminiKey);
+    const geminiResolution = await resolveGeminiModels(geminiKey);
+    if (geminiResolution.status !== 200) return geminiCatalogFailure(res, geminiResolution.status);
+    if (!geminiResolution.models.length) return sendError(res, 502, "GEMINI_MODEL_UNAVAILABLE", "此辨讀金鑰未列出支援 generateContent 的可用 Gemini 模型。請確認金鑰所屬專案已取得 Gemini 模型使用權限。");
+    const geminiModels = geminiResolution.models;
 
     let responseText = "";
     let responseStatus = 0;
