@@ -89,12 +89,18 @@
 - [ ] 以正式網址核對 `/api/ocr` 可進入原生 Vercel 函式，無論輸入是否有效均回傳 JSON，不再出現 `FUNCTION_INVOCATION_FAILED` 或純文字伺服器錯誤。
 - [ ] 由使用者於 iOS 與 Android 各實測一次觀圖析字，確認拍攝或選取照片後能預填商店、歲時、總額與逐項名目；若上游辨識失敗，介面必須顯示可讀提示。
 - [x] 已隔離 tRPC／Express／路徑別名函式載入鏈，改為無外部程式相依的原生 `/api/ocr` Serverless 函式；新函式的 Node 22 編譯、JSON 錯誤回應單元測試、型別檢查、45 項回歸測試與正式建置均已通過。
-- [ ] 查明原生 `/api/ocr` 已成功回傳 JSON 但 Gemini 上游分析未完成的原因，並將可安全揭露的服務回應呈現於介面，以區分金鑰、模型、配額與暫時性服務錯誤。
+- [x] 已在本機加入 Gemini 模型 404 備援：函式依序嘗試 `gemini-2.5-flash` 與 `gemini-2.0-flash`，並在皆不可用時回覆可讀提示；型別檢查、45 項測試與正式建置均通過。
+- [ ] 提交模型備援後，保存並核對正式 `GET/POST https://vellum-tides.vercel.app/api/ocr` 與 GitHub `main` 的實際回應證據，確認手機顯示的 404 究竟來自模型上游或正式部署路由。
+- [ ] 補強觀圖析字錯誤呈現：明確區分並顯示金鑰無效、模型不存在、配額不足、輸入格式與暫時性服務失敗，並新增前端回歸契約。
 - [ ] 使用正式 GitHub `main` 與 `vellum-tides.vercel.app/api/ocr` 的直接回應重新驗證新函式是否存在；使用者已再次以 iOS 複測仍顯示連線未完成，不可再以本機假設推論部署狀態。
 - [x] 依使用者要求，完成全專案檔案稽核並建立 `vellum-tides-clean-source.zip`：保留 Vercel、Supabase、PWA、觀圖析字與必要測試設定；已移除舊 tRPC／Express／Drizzle／Manus 模板伺服器、預覽偵錯資產、研究文件、建置產物、快取、環境檔與未使用元件。型別檢查、44 項離線回歸測試與正式建置均通過，壓縮檔完整性已核對。
 - [x] 已重新啟動本機開發伺服器並確認預覽可重新載入：Vite 改為監聽所有網路介面，且已移除清理後殘留的 `tw-animate-css` 匯入；登入入口畫面核對正常。
 - [x] 已以 GitHub `main` 提交 `daaf5bafe49d84a6f4b57e5a22309ade8e04b7f7` 的乾淨副本重現 Vercel 錯誤：`client/src/index.css` 殘留已移除套件 `tw-animate-css` 的匯入，導致 Vite 無法解析；本機已移除該匯入並以鎖定依賴建置通過。
 - [ ] 將已修正的 `client/src/index.css`（或更新後的完整乾淨原始碼包）提交 GitHub `main`，確認 Vercel 以 `pnpm install --frozen-lockfile && pnpm build` 成功建置。
+- [x] 已直接核對 GitHub `main` 與正式網址：`api/ocr.ts` 已存在，`GET /api/ocr` 正確回覆 405 JSON「只接受 POST 請求。」；手機畫面的 404 不再屬於函式未建立的路由問題，待部署模型備援後以 POST 請求取得正式上游證據。
+- [x] 已在本機加入 Gemini 模型備援：函式依序嘗試 `gemini-2.5-flash` 與 `gemini-2.0-flash`，並在皆不可用時回覆可讀提示；型別檢查、47 項測試與正式建置均通過。
+- [x] 已補強觀圖析字錯誤呈現：原生函式回傳穩定錯誤代碼，行動端明確區分登入、輸入、服務設定、模型不可用、權限、配額、上游暫停與結果不完整。
+- [ ] 提交模型備援後，保存並核對正式 `GET/POST https://vellum-tides.vercel.app/api/ocr` 與 GitHub `main` 的實際回應證據，確認模型備援已在正式站運作。
 
 <!-- 已完成或已淘汰的歷程追溯；不屬於現行維護清單。
 

@@ -12,6 +12,14 @@ type DraftInvoice = { seller_name: string; invoice_number: string; invoice_date:
 type PendingItem = { id: string; title: string; amount: number; major: LedgerMajor | null; tags: string[]; handled_by: string | null; classification_confirmed: boolean };
 type PendingInvoice = { id: string; seller_name: string; invoice_date: string | null; total_amount: number; invoice_items: PendingItem[] };
 type OcrResult = { seller_name: string; invoice_number: string; invoice_date: string; random_code: string; total_amount: number; confidence: number; items: Array<{ title: string; quantity: number; unit_price: number; amount: number; major: LedgerMajor | null; tags: string[] }> };
+type OcrErrorBody = { message?: string; code?: string };
+
+class OcrRequestError extends Error {
+  constructor(message: string, readonly code?: string) {
+    super(message);
+    this.name = "OcrRequestError";
+  }
+}
 
 const emptyInvoice = (): DraftInvoice => ({ seller_name: "", invoice_number: "", invoice_date: new Date().toISOString().slice(0, 10), random_code: "", total_amount: "", barcode_text: "", confidence: null });
 const emptyItem = (handlerId: string): DraftItem => ({ key: crypto.randomUUID(), title: "", quantity: "1", unit_price: "", amount: "", major: "", tags: "", handled_by: handlerId });
@@ -63,6 +71,20 @@ async function prepareOcrImage(file: File) {
 
 function displayOcrError(error: unknown) {
   const message = error instanceof Error ? error.message : "照片辨識暫時無法完成。";
+  const code = error instanceof OcrRequestError ? error.code : undefined;
+  const guidance: Record<string, string> = {
+    INVALID_INPUT: "照片或登入資料格式不符，請重新登入，並改選一張清晰的 JPG、PNG 或 WebP 憑據。",
+    AUTH_EXPIRED: "登入憑證已失效，請先重新登入後再試。",
+    SUPABASE_CONFIG: "觀圖析字的帳本連線尚未就緒，請稍後再試。",
+    GEMINI_CONFIG: "觀圖析字尚未設定辨讀金鑰，請檢查正式部署的服務設定。",
+    GEMINI_MODEL_UNAVAILABLE: "觀圖析字服務目前沒有可用模型，請確認辨讀服務的 API 已啟用並允許使用模型。",
+    GEMINI_AUTH: "觀圖析字金鑰沒有模型使用權限，請檢查正式部署的金鑰設定。",
+    GEMINI_QUOTA: "觀圖析字服務目前額度已滿，請稍後重試，或先改用手動憑據。",
+    GEMINI_UPSTREAM_UNAVAILABLE: "觀圖析字服務暫時無法回應，請稍後重試。",
+    GEMINI_REQUEST_REJECTED: "此照片未被辨讀服務接受，請改拍完整、清晰且光線充足的憑據。",
+    OCR_RESULT_INVALID: "照片已有回應但內容不完整，請換一張較清晰的憑據或改用手動憑據。",
+  };
+  if (code && guidance[code]) return guidance[code];
   if (/Unexpected token|not valid JSON|page could not be found|expected pattern/i.test(message)) {
     return "觀圖析字服務的連線暫時未完成，請稍後重試；仍可切換手動憑據繼續建立品項。";
   }
@@ -76,13 +98,16 @@ async function requestOcr(accessToken: string, imageDataUrl: string): Promise<Oc
     body: JSON.stringify({ accessToken, imageDataUrl }),
   });
   const responseText = await response.text();
-  let body: { message?: string } | OcrResult;
+  let body: OcrErrorBody | OcrResult;
   try {
     body = JSON.parse(responseText) as { message?: string } | OcrResult;
   } catch {
     throw new Error("觀圖析字服務回傳了無法辨讀的內容，請稍後重試。", { cause: responseText.slice(0, 180) });
   }
-  if (!response.ok) throw new Error("message" in body && body.message ? body.message : "觀圖析字服務暫時無法完成。");
+  if (!response.ok) {
+    const errorBody = body as OcrErrorBody;
+    throw new OcrRequestError(errorBody.message || "觀圖析字服務暫時無法完成。", errorBody.code);
+  }
   return body as OcrResult;
 }
 

@@ -3,8 +3,23 @@ type ResponseLike = { status: (statusCode: number) => ResponseLike; json: (body:
 
 export const config = { maxDuration: 30 };
 
+type OcrErrorCode =
+  | "METHOD_NOT_ALLOWED"
+  | "INVALID_INPUT"
+  | "SUPABASE_CONFIG"
+  | "AUTH_EXPIRED"
+  | "GEMINI_CONFIG"
+  | "GEMINI_MODEL_UNAVAILABLE"
+  | "GEMINI_AUTH"
+  | "GEMINI_QUOTA"
+  | "GEMINI_UPSTREAM_UNAVAILABLE"
+  | "GEMINI_REQUEST_REJECTED"
+  | "OCR_RESULT_INVALID"
+  | "OCR_INTERNAL_ERROR";
+
 const majors = new Set(["food", "home", "transport", "culture", "misc", "salary", "gain", "windfall"]);
 const imageDataUrlPattern = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/]+={0,2})$/;
+const geminiModels = ["gemini-2.5-flash", "gemini-2.0-flash"] as const;
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -67,49 +82,71 @@ function send(res: ResponseLike, status: number, body: unknown) {
   return res.status(status).json(body);
 }
 
+function sendError(res: ResponseLike, status: number, code: OcrErrorCode, message: string) {
+  return send(res, status, { code, message });
+}
+
+function geminiFailure(res: ResponseLike, status: number) {
+  if (status === 404) return sendError(res, 502, "GEMINI_MODEL_UNAVAILABLE", "觀圖析字暫無可用模型。請確認 GEMINI_API_KEY 已啟用 Generative Language API 與可用模型權限。");
+  if (status === 401 || status === 403) return sendError(res, 502, "GEMINI_AUTH", "觀圖析字金鑰無法取得模型使用權限，請檢查 Vercel 的 GEMINI_API_KEY 設定。");
+  if (status === 429) return sendError(res, 502, "GEMINI_QUOTA", "觀圖析字服務目前額度已滿，請稍後再試或改用手動憑據。");
+  if (status >= 500 || status === 0) return sendError(res, 502, "GEMINI_UPSTREAM_UNAVAILABLE", "觀圖析字服務暫時無法回應，請稍後再試或改用手動憑據。");
+  return sendError(res, 502, "GEMINI_REQUEST_REJECTED", `觀圖析字服務拒絕此次請求（${status}），請換一張清晰且完整的憑據照片再試。`);
+}
+
 export default async function handler(req: RequestLike, res: ResponseLike) {
-  if (req.method !== "POST") return send(res, 405, { message: "只接受 POST 請求。" });
+  if (req.method !== "POST") return sendError(res, 405, "METHOD_NOT_ALLOWED", "只接受 POST 請求。");
 
   try {
     const body = parseRequestBody(req.body);
     const accessToken = typeof body?.accessToken === "string" ? body.accessToken : "";
     const imageDataUrl = typeof body?.imageDataUrl === "string" ? body.imageDataUrl : "";
     const imageMatch = imageDataUrl.match(imageDataUrlPattern);
-    if (accessToken.length < 20 || !imageMatch) return send(res, 400, { message: "影像或登入憑證格式無法辨識，請重新登入後再試。" });
+    if (accessToken.length < 20 || !imageMatch) return sendError(res, 400, "INVALID_INPUT", "影像或登入憑證格式無法辨識，請重新登入後再試。");
 
     const supabaseUrl = process.env.VITE_SUPABASE_URL;
     const supabaseKey = process.env.VITE_SUPABASE_PUBLISHABLE_KEY;
-    if (!supabaseUrl || !supabaseKey) return send(res, 500, { message: "觀圖析字服務尚未完成資料庫連線設定。" });
+    if (!supabaseUrl || !supabaseKey) return sendError(res, 500, "SUPABASE_CONFIG", "觀圖析字服務尚未完成資料庫連線設定。");
 
     const userResponse = await fetch(`${supabaseUrl}/auth/v1/user`, {
       headers: { apikey: supabaseKey, authorization: `Bearer ${accessToken}` },
     });
-    if (!userResponse.ok) return send(res, 401, { message: "登入憑證已失效，請重新登入後再試。" });
+    if (!userResponse.ok) return sendError(res, 401, "AUTH_EXPIRED", "登入憑證已失效，請重新登入後再試。");
 
     const geminiKey = process.env.GEMINI_API_KEY;
-    if (!geminiKey) return send(res, 500, { message: "觀圖析字服務尚未設定辨讀金鑰。" });
+    if (!geminiKey) return sendError(res, 500, "GEMINI_CONFIG", "觀圖析字服務尚未設定辨讀金鑰。");
 
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(geminiKey)}`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ parts: [
-          { text: "請辨讀這張台灣消費憑據，只回覆 JSON，不要 markdown。欄位：seller_name、invoice_number、invoice_date（YYYY-MM-DD）、random_code、total_amount、confidence（0 到 1）、items。items 每項包含 title、quantity、unit_price、amount、major（僅 food、home、transport、culture、misc、salary、gain、windfall 之一或 null）、tags（字串陣列）。看不清的欄位使用空字串、0 或 null。" },
-          { inline_data: { mime_type: imageMatch[1], data: imageMatch[2] } },
-        ] }],
-        generationConfig: { responseMimeType: "application/json", temperature: 0.1 },
-      }),
+    const requestBody = JSON.stringify({
+      contents: [{ parts: [
+        { text: "請辨讀這張台灣消費憑據，只回覆 JSON，不要 markdown。欄位：seller_name、invoice_number、invoice_date（YYYY-MM-DD）、random_code、total_amount、confidence（0 到 1）、items。items 每項包含 title、quantity、unit_price、amount、major（僅 food、home、transport、culture、misc、salary、gain、windfall 之一或 null）、tags（字串陣列）。看不清的欄位使用空字串、0 或 null。" },
+        { inline_data: { mime_type: imageMatch[1], data: imageMatch[2] } },
+      ] }],
+      generationConfig: { responseMimeType: "application/json", temperature: 0.1 },
     });
-    const responseText = await response.text();
-    if (!response.ok) return send(res, 502, { message: `觀圖析字服務暫時無法回應（${response.status}）。`, detail: responseText.replace(/\s+/g, " ").slice(0, 180) });
+
+    let responseText = "";
+    let responseStatus = 0;
+    let responseOk = false;
+    for (const model of geminiModels) {
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(geminiKey)}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: requestBody,
+      });
+      responseStatus = response.status;
+      responseText = await response.text();
+      responseOk = response.ok;
+      if (response.ok || response.status !== 404) break;
+    }
+    if (!responseOk) return geminiFailure(res, responseStatus);
 
     const payload = modelJson(responseText) as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> } | null;
     const raw = payload?.candidates?.[0]?.content?.parts?.find(part => typeof part.text === "string")?.text;
     const result = typeof raw === "string" ? validateResult(modelJson(raw)) : null;
-    if (!result) return send(res, 502, { message: "觀圖析字結果格式不完整，請改用手動憑據。" });
+    if (!result) return sendError(res, 502, "OCR_RESULT_INVALID", "觀圖析字結果格式不完整，請改用手動憑據。");
     return send(res, 200, result);
   } catch (error) {
     console.error("[ocr]", error);
-    return send(res, 500, { message: "觀圖析字服務暫時無法完成，請稍後重試或改用手動憑據。" });
+    return sendError(res, 500, "OCR_INTERNAL_ERROR", "觀圖析字服務暫時無法完成，請稍後重試或改用手動憑據。");
   }
 }
