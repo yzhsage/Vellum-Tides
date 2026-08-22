@@ -1,6 +1,8 @@
 type RequestLike = { method?: string; body?: unknown };
 type ResponseLike = { status: (statusCode: number) => ResponseLike; json: (body: unknown) => void; setHeader: (name: string, value: string) => void };
 
+export const config = { maxDuration: 30 };
+
 const majors = new Set(["food", "home", "transport", "culture", "misc", "salary", "gain", "windfall"]);
 const imageDataUrlPattern = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/]+={0,2})$/;
 

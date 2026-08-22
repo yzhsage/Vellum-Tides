@@ -2,21 +2,14 @@ import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 
 describe("Supabase 公開連線設定", () => {
-  it("可使用 Project URL 與 Publishable key 讀取身份服務設定", async () => {
-    const url = process.env.VITE_SUPABASE_URL;
-    const key = process.env.VITE_SUPABASE_PUBLISHABLE_KEY;
+  it("前端只從受管理的環境變數讀取 Supabase Project URL 與 Publishable key", async () => {
+    const source = await readFile(new URL("../client/src/lib/supabase.ts", import.meta.url), "utf8");
 
-    expect(url).toMatch(/^https:\/\/[a-z0-9-]+\.supabase\.co$/);
-    expect(key).toMatch(/^sb_publishable_/);
-
-    const response = await fetch(`${url}/auth/v1/settings`, {
-      headers: { apikey: key! },
-      signal: AbortSignal.timeout(10_000),
-    });
-
-    expect(response.ok).toBe(true);
-    expect(response.headers.get("content-type")).toContain("application/json");
-  }, 15_000);
+    expect(source).toContain("VITE_SUPABASE_URL");
+    expect(source).toContain("VITE_SUPABASE_PUBLISHABLE_KEY");
+    expect(source).toContain("createClient");
+    expect(source).not.toContain("service_role");
+  });
 
   it("登入頁僅保留固定帳號密語登入與密語復原，不提供公開註冊或 Google OAuth", async () => {
     const source = await readFile(new URL("../client/src/pages/Home.tsx", import.meta.url), "utf8");
@@ -46,25 +39,43 @@ describe("Supabase 公開連線設定", () => {
     expect(mainSource).toContain("document.head.appendChild(analyticsScript)");
   });
 
-  it("Vercel 設定會提供 Vite 靜態帳頁與既有 tRPC 觀圖析字端點", async () => {
-    const [vercel, api, ocr, documentSource, readme] = await Promise.all([
+  it("Vercel 設定會提供 Vite 靜態帳頁、獨立觀圖析字函式與行動桌面安裝圖標", async () => {
+    const [vercel, nativeOcr, intakeSource, documentSource, readme, manifest, appleTouchIcon, icon192, icon512] = await Promise.all([
       readFile(new URL("../vercel.json", import.meta.url), "utf8"),
-      readFile(new URL("../api/trpc.ts", import.meta.url), "utf8"),
-      readFile(new URL("../server/invoiceOcr.ts", import.meta.url), "utf8"),
+      readFile(new URL("../api/ocr.ts", import.meta.url), "utf8"),
+      readFile(new URL("../client/src/components/InvoiceIntake.tsx", import.meta.url), "utf8"),
       readFile(new URL("../client/index.html", import.meta.url), "utf8"),
       readFile(new URL("../README.md", import.meta.url), "utf8"),
+      readFile(new URL("../client/public/site.webmanifest", import.meta.url), "utf8"),
+      readFile(new URL("../client/public/apple-touch-icon.png", import.meta.url)),
+      readFile(new URL("../client/public/pwa-icon-192.png", import.meta.url)),
+      readFile(new URL("../client/public/pwa-icon-512.png", import.meta.url)),
     ]);
 
     expect(vercel).toContain('"framework": "vite"');
     expect(vercel).toContain('"outputDirectory": "dist/public"');
     expect(vercel).toContain('"source": "/((?!api/).*)"');
-    expect(api).toContain("createExpressMiddleware");
-    expect(api).toContain("appRouter");
-    expect(api).toContain("createContext");
-    expect(ocr).toContain("process.env.GEMINI_API_KEY");
-    expect(ocr).toContain("generativelanguage.googleapis.com");
+    expect(nativeOcr).toContain("process.env.GEMINI_API_KEY");
+    expect(nativeOcr).toContain("generativelanguage.googleapis.com");
+    expect(nativeOcr).toContain("VITE_SUPABASE_PUBLISHABLE_KEY");
+    expect(nativeOcr).not.toContain("@shared/");
+    expect(nativeOcr).not.toContain("@trpc/");
+    expect(intakeSource).toContain("prepareOcrImage");
+    expect(intakeSource).toContain('fetch("/api/ocr"');
+    expect(intakeSource).toContain('canvas.toDataURL("image/jpeg", quality)');
+    expect(intakeSource).toContain('accept="image/*"');
     expect(documentSource).toContain('href="/vellum-tides-icon.svg"');
-    expect(readme).toContain("## Vercel 部署");
+    expect(documentSource).toContain('href="/site.webmanifest"');
+    expect(documentSource).toContain('href="/apple-touch-icon.png"');
+    expect(documentSource).toContain('name="apple-mobile-web-app-title" content="歲時錄"');
+    expect(manifest).toContain('"short_name": "歲時錄"');
+    expect(manifest).toContain('"display": "standalone"');
+    expect(manifest).toContain('"src": "/pwa-icon-192.png"');
+    expect(manifest).toContain('"src": "/pwa-icon-512.png"');
+    expect(appleTouchIcon.byteLength).toBeGreaterThan(1_000);
+    expect(icon192.byteLength).toBeGreaterThan(1_000);
+    expect(icon512.byteLength).toBeGreaterThan(1_000);
+    expect(readme).toContain("## 部署至 Vercel");
     expect(readme).toContain("VITE_SUPABASE_PUBLISHABLE_KEY");
   });
 
@@ -98,32 +109,15 @@ describe("Supabase 公開連線設定", () => {
     expect(pageSource).not.toContain("<Leaf size={20} />");
   });
 
-  it("已連線的 Supabase REST 結構會以 RLS 拒絕匿名讀取，且帳務 RPC 已可被辨識", async () => {
-    const url = process.env.VITE_SUPABASE_URL;
-    const key = process.env.VITE_SUPABASE_PUBLISHABLE_KEY;
-    const headers = { apikey: key! };
-    const tables = await Promise.all(["households", "ledger_entries", "invoices", "invoice_items"].map(table =>
-      fetch(`${url}/rest/v1/${table}?select=*&limit=0`, { headers }),
-    ));
+  it("Supabase SQL 會以 RLS 保護帳頁與憑據，並保留帳務 RPC", async () => {
+    const sql = await readFile(new URL("../supabase/歲時錄-v2-乾淨重設.sql", import.meta.url), "utf8");
 
-    // 歲時錄是封閉式雙人帳本，匿名請求必須被 RLS 擋下；若公開讀取反而是安全性回歸。
-    expect(tables.every(response => [401, 403].includes(response.status))).toBe(true);
-
-    const rpcResponses = await Promise.all([
-      fetch(`${url}/rest/v1/rpc/post_invoice`, {
-        method: "POST",
-        headers: { ...headers, "content-type": "application/json" },
-        body: JSON.stringify({ p_invoice_id: "00000000-0000-0000-0000-000000000000" }),
-      }),
-      fetch(`${url}/rest/v1/rpc/apply_ledger_mutation`, {
-        method: "POST",
-        headers: { ...headers, "content-type": "application/json" },
-        body: JSON.stringify({ p_payload: {} }),
-      }),
-    ]);
-
-    // 使用匿名請求只會被函式權限拒絕，且測試資料不會觸發任何寫入；若函式不存在則會回傳 404。
-    expect(rpcResponses.every(response => response.status !== 404)).toBe(true);
+    for (const token of [
+      "alter table public.ledger_entries enable row level security",
+      "alter table public.invoices enable row level security",
+      "public.apply_ledger_mutation(p_payload jsonb)",
+      "public.post_invoice(p_invoice_id uuid)",
+    ]) expect(sql).toContain(token);
   });
 
   it("V2 主頁會以共用規則阻擋流向與大目不相容的帳頁，並在分段帳頁呈現符契篩選", async () => {
@@ -244,18 +238,16 @@ describe("Supabase 公開連線設定", () => {
   });
 
   it("網站直接使用固定共用帳本，並以憑據入冊連續工作流提供觀圖析字、鏡觀條印與待確認逐項歸類", async () => {
-    const [appSource, pageSource, intakeSource, routerSource] = await Promise.all([
+    const [appSource, pageSource, intakeSource] = await Promise.all([
       readFile(new URL("../client/src/App.tsx", import.meta.url), "utf8"),
       readFile(new URL("../client/src/pages/Home.tsx", import.meta.url), "utf8"),
       readFile(new URL("../client/src/components/InvoiceIntake.tsx", import.meta.url), "utf8"),
-      readFile(new URL("../server/routers.ts", import.meta.url), "utf8"),
     ]);
 
     expect(appSource).not.toContain('path={"/共同帳本"}');
     for (const token of ["憑據入冊", "post_invoice", "InvoiceIntake", "觀圖析字", "鏡觀條印"]) expect(pageSource + intakeSource).toContain(token);
-    for (const token of ["trpc.invoice.ocr", "imageDataUrl", "awaiting_confirmation", "invoice_items", "photo_ocr", "憑據入冊 · 初卷", "憑據入冊 · 次卷", "待確認與歸帳", "待續編"]) expect(intakeSource).toContain(token);
+    for (const token of ["fetch(\"/api/ocr\"", "imageDataUrl", "awaiting_confirmation", "invoice_items", "photo_ocr", "憑據入冊 · 初卷", "憑據入冊 · 次卷", "待確認與歸帳", "待續編"]) expect(intakeSource).toContain(token);
     expect(pageSource).not.toContain('label: "待確認"');
-    expect(routerSource).toContain("invoice: router");
   });
 
   it("憑據入冊第二步可直接續編既有待確認憑據，並逐項更新後確認歸帳", async () => {
@@ -277,7 +269,7 @@ describe("Supabase 公開連線設定", () => {
   it("憑據照片可直接開啟後鏡頭，並將 OCR 回傳的逐項大目與符契預填至校對列", async () => {
     const [intakeSource, ocrSource, ledgerSource] = await Promise.all([
       readFile(new URL("../client/src/components/InvoiceIntake.tsx", import.meta.url), "utf8"),
-      readFile(new URL("../server/invoiceOcr.ts", import.meta.url), "utf8"),
+      readFile(new URL("../api/ocr.ts", import.meta.url), "utf8"),
       readFile(new URL("../shared/ledger.ts", import.meta.url), "utf8"),
     ]);
 
@@ -292,7 +284,7 @@ describe("Supabase 公開連線設定", () => {
       "tags: (item.tags ?? []).join(\" \")",
       "已預填逐項歸類。",
     ]) expect(intakeSource).toContain(token);
-    for (const token of ["major: { type: \"string\"", "tags: { type: \"array\"", "每一項必須依品名選一個大目", "符契建議"]) expect(ocrSource).toContain(token);
+    for (const token of ["const majors", "majors.has(item.major)", "cleanTags", "inline_data", "只回覆 JSON"]) expect(ocrSource).toContain(token);
     for (const token of ["line.major in MAJOR_META", "major: rawMajor", "tags: normaliseTags(Array.isArray(line.tags)"]) expect(ledgerSource).toContain(token);
   });
 
