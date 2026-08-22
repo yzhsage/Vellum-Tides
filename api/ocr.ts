@@ -18,7 +18,11 @@ type OcrErrorCode =
   | "OCR_INTERNAL_ERROR";
 
 const majors = new Set(["food", "home", "transport", "culture", "misc", "salary", "gain", "windfall"]);
-const geminiModels = ["gemini-2.5-flash", "gemini-2.0-flash"] as const;
+const geminiModels = [
+  "gemini-1.5-flash",
+  "gemini-1.5-pro",
+  "gemini-2.0-flash-exp"
+] as const;
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
