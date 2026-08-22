@@ -54,13 +54,18 @@ describe("原生觀圖析字 Vercel 函式", () => {
     expect(capture.result().body).toMatchObject({ code: "OCR_PAYLOAD_TOO_LARGE" });
   });
 
-  it("第一個 Gemini 模型回傳 404 時會改用相容模型，不把上游 404 誤認為網站端點不存在", async () => {
+  it("依金鑰模型列表選擇可用的 Gemini Flash 模型，不使用已停止服務的舊模型名稱", async () => {
     vi.stubEnv("VITE_SUPABASE_URL", "https://example.supabase.co");
     vi.stubEnv("VITE_SUPABASE_PUBLISHABLE_KEY", "publishable-test-key");
     vi.stubEnv("GEMINI_API_KEY", "gemini-test-key");
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response("{}", { status: 200 }))
-      .mockResolvedValueOnce(new Response('{"error":{"message":"model not found"}}', { status: 404 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ models: [
+        { name: "models/gemini-2.5-flash", supportedGenerationMethods: ["generateContent"] },
+        { name: "models/gemini-3.6-flash", supportedGenerationMethods: ["generateContent"] },
+        { name: "models/gemini-2.0-flash", supportedGenerationMethods: ["generateContent"] },
+      ] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response('{"error":{"message":"temporarily unavailable"}}', { status: 404 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({
         candidates: [{ content: { parts: [{ text: JSON.stringify({
           seller_name: "書店",
@@ -80,18 +85,22 @@ describe("原生觀圖析字 Vercel 函式", () => {
       body: { accessToken: "a".repeat(24), imageDataUrl: "data:image/jpeg;base64,aGVsbG8=" },
     }, capture.response);
 
-    expect(fetchMock).toHaveBeenCalledTimes(3);
-    expect(String(fetchMock.mock.calls[1]?.[0])).toContain("gemini-2.5-flash");
-    expect(String(fetchMock.mock.calls[2]?.[0])).toContain("gemini-2.0-flash");
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(String(fetchMock.mock.calls[1]?.[0])).toContain("/v1beta/models?");
+    expect(String(fetchMock.mock.calls[2]?.[0])).toContain("gemini-2.5-flash");
+    expect(String(fetchMock.mock.calls[3]?.[0])).toContain("gemini-3.6-flash");
+    expect(String(fetchMock.mock.calls.map(call => call[0]))).not.toContain("gemini-2.0-flash:generateContent");
     expect(capture.result().statusCode).toBe(200);
   });
 
-  it("兩個 Gemini 模型都找不到時回傳可供手機端分類的模型錯誤代碼", async () => {
+  it("模型列表無可用文字生成模型且穩定備援皆不存在時，回傳可供手機端分類的模型錯誤代碼", async () => {
     vi.stubEnv("VITE_SUPABASE_URL", "https://example.supabase.co");
     vi.stubEnv("VITE_SUPABASE_PUBLISHABLE_KEY", "publishable-test-key");
     vi.stubEnv("GEMINI_API_KEY", "gemini-test-key");
     vi.stubGlobal("fetch", vi.fn()
       .mockResolvedValueOnce(new Response("{}", { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ models: [{ name: "models/gemini-2.0-flash", supportedGenerationMethods: ["generateContent"] }] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response('{"error":{"message":"model not found"}}', { status: 404 }))
       .mockResolvedValueOnce(new Response('{"error":{"message":"model not found"}}', { status: 404 }))
       .mockResolvedValueOnce(new Response('{"error":{"message":"model not found"}}', { status: 404 })));
     const capture = createResponse();
@@ -108,6 +117,7 @@ describe("原生觀圖析字 Vercel 函式", () => {
     vi.stubEnv("GEMINI_API_KEY", "gemini-test-key");
     vi.stubGlobal("fetch", vi.fn()
       .mockResolvedValueOnce(new Response("{}", { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ models: [{ name: "models/gemini-2.5-flash", supportedGenerationMethods: ["generateContent"] }] }), { status: 200 }))
       .mockResolvedValueOnce(new Response('{"error":{"message":"quota exhausted"}}', { status: 429 })));
     const capture = createResponse();
 
@@ -123,6 +133,7 @@ describe("原生觀圖析字 Vercel 函式", () => {
     vi.stubEnv("GEMINI_API_KEY", "gemini-test-key");
     vi.stubGlobal("fetch", vi.fn()
       .mockResolvedValueOnce(new Response("{}", { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ models: [{ name: "models/gemini-2.5-flash", supportedGenerationMethods: ["generateContent"] }] }), { status: 200 }))
       .mockRejectedValueOnce(new TypeError("upstream connection reset")));
     const capture = createResponse();
 

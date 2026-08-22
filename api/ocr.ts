@@ -20,7 +20,8 @@ type OcrErrorCode =
 
 const majors = new Set(["food", "home", "transport", "culture", "misc", "salary", "gain", "windfall"]);
 const imageDataUrlPattern = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/]+={0,2})$/;
-const geminiModels = ["gemini-2.5-flash", "gemini-2.0-flash"] as const;
+const fallbackGeminiModels = ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.5-pro"] as const;
+const geminiModelPriority = ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.5-pro", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"] as const;
 const MAX_SAFE_IMAGE_DATA_URL_LENGTH = 1_800_000;
 const GEMINI_REQUEST_TIMEOUT_MS = 20_000;
 
@@ -107,6 +108,30 @@ async function fetchGemini(input: string, init: RequestInit) {
   }
 }
 
+function availableGeminiModels(value: unknown) {
+  const payload = asRecord(value);
+  const models = Array.isArray(payload?.models) ? payload.models.map(asRecord).filter((model): model is Record<string, unknown> => Boolean(model)) : [];
+  const visibleModels = models
+    .filter(model => Array.isArray(model.supportedGenerationMethods) && model.supportedGenerationMethods.includes("generateContent"))
+    .map(model => typeof model.name === "string" ? model.name.replace(/^models\//, "") : "")
+    .filter(name => /^gemini-/.test(name) && !/^gemini-(?:1|2\.0)-/.test(name) && !/(?:-image|live|tts|audio|embedding|computer)/.test(name));
+  const visibleSet = new Set(visibleModels);
+  const preferred = geminiModelPriority.filter(model => visibleSet.has(model));
+  const additionalFlashModels = visibleModels.filter(model => !preferred.includes(model as typeof preferred[number]) && /flash/i.test(model));
+  return [...preferred, ...additionalFlashModels];
+}
+
+async function resolveGeminiModels(geminiKey: string) {
+  try {
+    const response = await fetchGemini(`https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(geminiKey)}`, { method: "GET" });
+    if (!response.ok) return [...fallbackGeminiModels];
+    const discovered = availableGeminiModels(JSON.parse(await response.text()));
+    return discovered.length ? discovered : [...fallbackGeminiModels];
+  } catch {
+    return [...fallbackGeminiModels];
+  }
+}
+
 export default async function handler(req: RequestLike, res: ResponseLike) {
   if (req.method !== "POST") return sendError(res, 405, "METHOD_NOT_ALLOWED", "只接受 POST 請求。");
 
@@ -137,6 +162,7 @@ export default async function handler(req: RequestLike, res: ResponseLike) {
       ] }],
       generationConfig: { responseMimeType: "application/json", temperature: 0.1 },
     });
+    const geminiModels = await resolveGeminiModels(geminiKey);
 
     let responseText = "";
     let responseStatus = 0;
