@@ -18,7 +18,6 @@ type OcrErrorCode =
   | "OCR_INTERNAL_ERROR";
 
 const majors = new Set(["food", "home", "transport", "culture", "misc", "salary", "gain", "windfall"]);
-const imageDataUrlPattern = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/]+={0,2})$/;
 const geminiModels = ["gemini-2.5-flash", "gemini-2.0-flash"] as const;
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -68,6 +67,7 @@ function validateResult(value: unknown) {
 }
 
 function modelJson(text: string) {
+  if (!text) return null;
   const stripped = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
   const objectText = stripped.match(/\{[\s\S]*\}/)?.[0] ?? stripped;
   try {
@@ -101,8 +101,15 @@ export default async function handler(req: RequestLike, res: ResponseLike) {
     const body = parseRequestBody(req.body);
     const accessToken = typeof body?.accessToken === "string" ? body.accessToken : "";
     const imageDataUrl = typeof body?.imageDataUrl === "string" ? body.imageDataUrl : "";
-    const imageMatch = imageDataUrl.match(imageDataUrlPattern);
-    if (accessToken.length < 20 || !imageMatch) return sendError(res, 400, "INVALID_INPUT", "影像或登入憑證格式無法辨識，請重新登入後再試。");
+    
+    // 強化 Base64 解析容錯率，避免空格或換行字元干擾
+    const imageMatch = imageDataUrl.match(/^data:(image\/(?:jpeg|png|webp));base64,(.+)$/s);
+    if (accessToken.length < 20 || !imageMatch) {
+      return sendError(res, 400, "INVALID_INPUT", "影像或登入憑證格式無法辨識，請重新登入後再試。");
+    }
+
+    const mimeType = imageMatch[1];
+    const base64Data = imageMatch[2].trim().replace(/\s/g, "");
 
     const supabaseUrl = process.env.VITE_SUPABASE_URL;
     const supabaseKey = process.env.VITE_SUPABASE_PUBLISHABLE_KEY;
@@ -119,7 +126,7 @@ export default async function handler(req: RequestLike, res: ResponseLike) {
     const requestBody = JSON.stringify({
       contents: [{ parts: [
         { text: "請辨讀這張台灣消費憑據，只回覆 JSON，不要 markdown。欄位：seller_name、invoice_number、invoice_date（YYYY-MM-DD）、random_code、total_amount、confidence（0 到 1）、items。items 每項包含 title、quantity、unit_price、amount、major（僅 food、home、transport、culture、misc、salary、gain、windfall 之一或 null）、tags（字串陣列）。看不清的欄位使用空字串、0 或 null。" },
-        { inline_data: { mime_type: imageMatch[1], data: imageMatch[2] } },
+        { inline_data: { mime_type: mimeType, data: base64Data } },
       ] }],
       generationConfig: { responseMimeType: "application/json", temperature: 0.1 },
     });
@@ -143,6 +150,7 @@ export default async function handler(req: RequestLike, res: ResponseLike) {
     const payload = modelJson(responseText) as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> } | null;
     const raw = payload?.candidates?.[0]?.content?.parts?.find(part => typeof part.text === "string")?.text;
     const result = typeof raw === "string" ? validateResult(modelJson(raw)) : null;
+
     if (!result) return sendError(res, 502, "OCR_RESULT_INVALID", "觀圖析字結果格式不完整，請改用手動憑據。");
     return send(res, 200, result);
   } catch (error) {
