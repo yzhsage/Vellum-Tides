@@ -125,7 +125,7 @@ export default async function handler(req: RequestLike, res: ResponseLike) {
 
     const requestBody = JSON.stringify({
       contents: [{ parts: [
-        { text: "請辨讀這張台灣消費憑據，只回覆 JSON，不要 markdown。欄位：seller_name、invoice_number、invoice_date（YYYY-MM-DD）、random_code、total_amount、confidence（0 到 1）、items。items 每項包含 title、quantity、unit_price、amount、major（僅 food、home、transport、culture、misc、salary、gain、windfall 之一或 null）、tags（字串陣列）。看不清的欄位使用空字串、0 或 null。" },
+        { text: "簡短辨讀這張台灣發票，只回覆極簡 JSON，不要思考過程，不要 markdown。欄位：seller_name、invoice_number、invoice_date（YYYY-MM-DD）、random_code、total_amount、confidence（0 到 1）、items。items 每項包含 title、quantity、unit_price、amount、major（僅 food、home、transport、culture、misc、salary、gain、windfall 之一或 null）、tags（字串陣列）。看不清的欄位使用空字串、0 或 null。" },
         { inline_data: { mime_type: mimeType, data: base64Data } },
       ] }],
       generationConfig: { responseMimeType: "application/json", temperature: 0.1 },

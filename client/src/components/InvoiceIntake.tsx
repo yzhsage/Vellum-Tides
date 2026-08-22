@@ -26,7 +26,7 @@ const emptyItem = (handlerId: string): DraftItem => ({ key: crypto.randomUUID(),
 const fieldClass = "w-full rounded-xl border border-vellum-200 bg-vellum-50 px-3.5 py-2.5 text-sm text-ink-700 outline-none transition placeholder:text-ink-500/55 focus:border-moss-500 focus:ring-2 focus:ring-moss-100";
 const metaFieldClass = "w-full sm:w-[15rem]";
 const MAX_OCR_SOURCE_BYTES = 12_000_000;
-const MAX_OCR_DATA_URL_LENGTH = 3_500_000;
+const MAX_OCR_DATA_URL_LENGTH = 2_200_000;
 
 function loadReceiptImage(file: File) {
   return new Promise<HTMLImageElement>((resolve, reject) => {
