@@ -4,7 +4,6 @@ import { BrowserMultiFormatReader } from "@zxing/browser";
 import { type ChangeEvent, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { supabase } from "@/lib/supabase";
-import { trpc } from "@/lib/trpc";
 
 type IntakeSource = "photo_ocr" | "qr_barcode" | "manual";
 type Member = { user_id: string; display_name: string };
@@ -12,6 +11,7 @@ type DraftItem = { key: string; title: string; quantity: string; unit_price: str
 type DraftInvoice = { seller_name: string; invoice_number: string; invoice_date: string; random_code: string; total_amount: string; barcode_text: string; confidence: number | null };
 type PendingItem = { id: string; title: string; amount: number; major: LedgerMajor | null; tags: string[]; handled_by: string | null; classification_confirmed: boolean };
 type PendingInvoice = { id: string; seller_name: string; invoice_date: string | null; total_amount: number; invoice_items: PendingItem[] };
+type OcrResult = { seller_name: string; invoice_number: string; invoice_date: string; random_code: string; total_amount: number; confidence: number; items: Array<{ title: string; quantity: number; unit_price: number; amount: number; major: LedgerMajor | null; tags: string[] }> };
 
 const emptyInvoice = (): DraftInvoice => ({ seller_name: "", invoice_number: "", invoice_date: new Date().toISOString().slice(0, 10), random_code: "", total_amount: "", barcode_text: "", confidence: null });
 const emptyItem = (handlerId: string): DraftItem => ({ key: crypto.randomUUID(), title: "", quantity: "1", unit_price: "", amount: "", major: "", tags: "", handled_by: handlerId });
@@ -69,6 +69,23 @@ function displayOcrError(error: unknown) {
   return message;
 }
 
+async function requestOcr(accessToken: string, imageDataUrl: string): Promise<OcrResult> {
+  const response = await fetch("/api/ocr", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ accessToken, imageDataUrl }),
+  });
+  const responseText = await response.text();
+  let body: { message?: string } | OcrResult;
+  try {
+    body = JSON.parse(responseText) as { message?: string } | OcrResult;
+  } catch {
+    throw new Error("觀圖析字服務回傳了無法辨讀的內容，請稍後重試。", { cause: responseText.slice(0, 180) });
+  }
+  if (!response.ok) throw new Error("message" in body && body.message ? body.message : "觀圖析字服務暫時無法完成。");
+  return body as OcrResult;
+}
+
 export function InvoiceIntake({
   householdId,
   userId,
@@ -101,7 +118,7 @@ export function InvoiceIntake({
   const qrControlsRef = useRef<{ stop: () => void } | null>(null);
   const qrSessionRef = useRef(0);
   const [scanningQr, setScanningQr] = useState(false);
-  const ocr = trpc.invoice.ocr.useMutation();
+  const [ocrPending, setOcrPending] = useState(false);
 
   const stopQrScanner = () => {
     qrSessionRef.current += 1;
@@ -120,11 +137,12 @@ export function InvoiceIntake({
     event.target.value = "";
     if (!file) return;
     if (!supabase) return;
+    setOcrPending(true);
     try {
       const [{ data: sessionResult }, imageDataUrl] = await Promise.all([supabase.auth.getSession(), prepareOcrImage(file)]);
       const accessToken = sessionResult.session?.access_token;
       if (!accessToken) throw new Error("登入憑證已失效，請重新登入後再試。");
-      const result = await ocr.mutateAsync({ accessToken, imageDataUrl });
+      const result = await requestOcr(accessToken, imageDataUrl);
       setInvoice({
         seller_name: result.seller_name,
         invoice_number: result.invoice_number,
@@ -140,6 +158,8 @@ export function InvoiceIntake({
       toast.success("已預填逐項歸類。", { description: `已帶入 ${result.items.length} 項名目、金額與大目建議；請校對後暫存至第二步。` });
     } catch (error) {
       toast.error("觀圖析字未完成。", { description: `${displayOcrError(error)} 可切換到手動憑據，繼續建立品項。` });
+    } finally {
+      setOcrPending(false);
     }
   };
 
@@ -235,7 +255,7 @@ export function InvoiceIntake({
       <h2 className="mt-2 font-vellum text-3xl font-black text-ink-700">憑據入冊</h2>
       <p className="mt-3 max-w-2xl text-sm leading-6 text-moss-700">觀圖析字會先摘錄品項，再預填逐項名目、金額、大目與可辨識的符契；只需校對有疑義的地方，暫存後即可在本頁第二步歸帳。</p>
       <div className="mt-6 grid gap-2 sm:grid-cols-3">{([ ["photo_ocr", Camera, "觀圖析字"], ["qr_barcode", QrCode, "鏡觀條印"], ["manual", Plus, "手動憑據"] ] as const).map(([value, Icon, label]) => <button key={value} type="button" onClick={() => { if (value !== "qr_barcode") stopQrScanner(); setSource(value); }} className={`flex items-center justify-center gap-2 rounded-xl border px-4 py-3 text-sm font-bold transition ${source === value ? "border-moss-700 bg-moss-700 text-vellum-50" : "border-moss-300 bg-vellum-50/75 text-moss-700 hover:bg-moss-100"}`}><Icon size={17} />{label}</button>)}</div>
-      {source === "photo_ocr" && <div className="mt-5 rounded-2xl border border-dashed border-moss-300 bg-vellum-50/65 p-5"><input ref={cameraRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={event => void handlePhoto(event)} /><input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={event => void handlePhoto(event)} /><div className="grid gap-3 sm:grid-cols-2"><button type="button" disabled={ocr.isPending} onClick={() => cameraRef.current?.click()} className="flex items-center justify-center gap-2 rounded-xl bg-ink-700 px-4 py-3 font-bold text-vellum-50 disabled:opacity-60">{ocr.isPending ? <Loader2 className="animate-spin" size={18} /> : <Camera size={18} />}{ocr.isPending ? "正在摘錄憑據…" : "開啟相機拍攝"}</button><button type="button" disabled={ocr.isPending} onClick={() => fileRef.current?.click()} className="flex items-center justify-center gap-2 rounded-xl border border-moss-300 bg-moss-100/55 px-4 py-3 font-bold text-moss-700 disabled:opacity-60"><FilePenLine size={18} />選擇既有照片</button></div><p className="mt-3 text-center text-xs leading-5 text-moss-700">在手機上，「開啟相機拍攝」會優先交由後鏡頭取景；桌面則自然改為選檔。影像只供本次析字、不會保存。送出前會自動縮放並轉為相容格式，以兼顧 iPhone、Android 與服務端的傳送限制；析字後會預填逐項名目、金額、大目與符契建議。</p></div>}
+      {source === "photo_ocr" && <div className="mt-5 rounded-2xl border border-dashed border-moss-300 bg-vellum-50/65 p-5"><input ref={cameraRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={event => void handlePhoto(event)} /><input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={event => void handlePhoto(event)} /><div className="grid gap-3 sm:grid-cols-2"><button type="button" disabled={ocrPending} onClick={() => cameraRef.current?.click()} className="flex items-center justify-center gap-2 rounded-xl bg-ink-700 px-4 py-3 font-bold text-vellum-50 disabled:opacity-60">{ocrPending ? <Loader2 className="animate-spin" size={18} /> : <Camera size={18} />}{ocrPending ? "正在摘錄憑據…" : "開啟相機拍攝"}</button><button type="button" disabled={ocrPending} onClick={() => fileRef.current?.click()} className="flex items-center justify-center gap-2 rounded-xl border border-moss-300 bg-moss-100/55 px-4 py-3 font-bold text-moss-700 disabled:opacity-60"><FilePenLine size={18} />選擇既有照片</button></div><p className="mt-3 text-center text-xs leading-5 text-moss-700">在手機上，「開啟相機拍攝」會優先交由後鏡頭取景；桌面則自然改為選檔。影像只供本次析字、不會保存。送出前會自動縮放並轉為相容格式，以兼顧 iPhone、Android 與服務端的傳送限制；析字後會預填逐項名目、金額、大目與符契建議。</p></div>}
       {source === "qr_barcode" && <div className="mt-5 space-y-4 rounded-2xl border border-dashed border-moss-300 bg-vellum-50/65 p-5"><div className="flex flex-wrap items-center justify-between gap-3"><div><h3 className="font-bold text-moss-700">鏡觀條印</h3><p className="mt-1 text-xs leading-5 text-moss-700">請允許相機權限，並讓直紋條契或方陣圖印保持在取景框內。觀得的文字會帶入下方欄位。</p></div>{scanningQr ? <button type="button" onClick={stopQrScanner} className="rounded-xl border border-ochre-300 bg-ochre-100/55 px-4 py-2.5 text-sm font-bold text-ochre-700">止住取景</button> : <button type="button" onClick={() => void startQrScanner()} className="inline-flex items-center gap-2 rounded-xl bg-ink-700 px-4 py-2.5 text-sm font-bold text-vellum-50"><Camera size={17} />開啟鏡觀</button>}</div><div className="overflow-hidden rounded-xl border border-moss-300 bg-ink-700"><video ref={qrVideoRef} muted playsInline className="aspect-video w-full object-cover" /></div><label className="block text-sm font-semibold text-ink-700"><span className="mb-1.5 block">條印文字</span><textarea value={invoice.barcode_text} onChange={event => setInvoice(current => ({ ...current, barcode_text: event.target.value }))} className={`${fieldClass} min-h-24 resize-y`} placeholder="也可手動貼上鏡觀所得的文字；尚未串接官方明細服務時，仍可在下方補寫品項。" /></label></div>}
     </article>
 
