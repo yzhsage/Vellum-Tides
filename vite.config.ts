@@ -19,5 +19,19 @@ export default defineConfig({
   },
   server: {
     host: "0.0.0.0",
+    allowedHosts: [
+      "5173-i5mhl4gp6gqoi32rrl979-7cd62328.sg1.manus.computer",
+      ".manus.computer",
+      ".manuspre.computer",
+      ".manus-asia.computer",
+      "localhost",
+      "127.0.0.1",
+    ],
+    proxy: {
+      "/api/ocr": {
+        target: "https://vellum-tides.vercel.app",
+        changeOrigin: true,
+      },
+    },
   },
 });

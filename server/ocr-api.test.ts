@@ -45,6 +45,15 @@ describe("原生觀圖析字 Vercel 函式", () => {
     expect(capture.result().body).toEqual({ code: "INVALID_INPUT", message: "影像或登入憑證格式無法辨識，請重新登入後再試。" });
   });
 
+  it("照片承載超過行動端安全上限時，在進入外部服務前回傳可讀的 413 JSON", async () => {
+    const capture = createResponse();
+
+    await handler({ method: "POST", body: { accessToken: "a".repeat(24), imageDataUrl: `data:image/jpeg;base64,${"a".repeat(1_800_001)}` } }, capture.response);
+
+    expect(capture.result().statusCode).toBe(413);
+    expect(capture.result().body).toMatchObject({ code: "OCR_PAYLOAD_TOO_LARGE" });
+  });
+
   it("第一個 Gemini 模型回傳 404 時會改用相容模型，不把上游 404 誤認為網站端點不存在", async () => {
     vi.stubEnv("VITE_SUPABASE_URL", "https://example.supabase.co");
     vi.stubEnv("VITE_SUPABASE_PUBLISHABLE_KEY", "publishable-test-key");
@@ -106,5 +115,20 @@ describe("原生觀圖析字 Vercel 函式", () => {
 
     expect(capture.result().statusCode).toBe(502);
     expect(capture.result().body).toMatchObject({ code: "GEMINI_QUOTA" });
+  });
+
+  it("Gemini 連線在函式內逾時或中斷時回傳結構化上游錯誤，而不讓用戶端只得到 Load failed", async () => {
+    vi.stubEnv("VITE_SUPABASE_URL", "https://example.supabase.co");
+    vi.stubEnv("VITE_SUPABASE_PUBLISHABLE_KEY", "publishable-test-key");
+    vi.stubEnv("GEMINI_API_KEY", "gemini-test-key");
+    vi.stubGlobal("fetch", vi.fn()
+      .mockResolvedValueOnce(new Response("{}", { status: 200 }))
+      .mockRejectedValueOnce(new TypeError("upstream connection reset")));
+    const capture = createResponse();
+
+    await handler({ method: "POST", body: { accessToken: "a".repeat(24), imageDataUrl: "data:image/jpeg;base64,aGVsbG8=" } }, capture.response);
+
+    expect(capture.result().statusCode).toBe(502);
+    expect(capture.result().body).toMatchObject({ code: "GEMINI_UPSTREAM_UNAVAILABLE" });
   });
 });

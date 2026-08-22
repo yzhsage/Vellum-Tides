@@ -63,6 +63,11 @@ describe("Supabase 公開連線設定", () => {
     expect(intakeSource).toContain("prepareOcrImage");
     expect(intakeSource).toContain('fetch("/api/ocr"');
     expect(intakeSource).toContain('canvas.toDataURL("image/jpeg", quality)');
+    expect(intakeSource).toContain("MAX_OCR_DATA_URL_LENGTH = 1_800_000");
+    expect(intakeSource).toContain("OCR_NETWORK_UNAVAILABLE");
+    expect(nativeOcr).toContain("MAX_SAFE_IMAGE_DATA_URL_LENGTH = 1_800_000");
+    expect(nativeOcr).toContain("GEMINI_REQUEST_TIMEOUT_MS = 20_000");
+    expect(nativeOcr).toContain("maxDuration: 60");
     expect(intakeSource).toContain('accept="image/*"');
     expect(documentSource).toContain('href="/vellum-tides-icon.svg"');
     expect(documentSource).toContain('href="/site.webmanifest"');
@@ -77,6 +82,14 @@ describe("Supabase 公開連線設定", () => {
     expect(icon512.byteLength).toBeGreaterThan(1_000);
     expect(readme).toContain("## 部署至 Vercel");
     expect(readme).toContain("VITE_SUPABASE_PUBLISHABLE_KEY");
+  });
+
+  it("本機 Vite 預覽會將觀圖析字請求轉送至既有的原生正式函式", async () => {
+    const viteConfig = await readFile(new URL("../vite.config.ts", import.meta.url), "utf8");
+
+    expect(viteConfig).toContain('"/api/ocr"');
+    expect(viteConfig).toContain('target: "https://vellum-tides.vercel.app"');
+    expect(viteConfig).toContain("changeOrigin: true");
   });
 
   it("登出後會清除本機帳本狀態，避免停留在已失效的帳頁", async () => {

@@ -1,7 +1,7 @@
 type RequestLike = { method?: string; body?: unknown };
 type ResponseLike = { status: (statusCode: number) => ResponseLike; json: (body: unknown) => void; setHeader: (name: string, value: string) => void };
 
-export const config = { maxDuration: 30 };
+export const config = { maxDuration: 60 };
 
 type OcrErrorCode =
   | "METHOD_NOT_ALLOWED"
@@ -15,14 +15,14 @@ type OcrErrorCode =
   | "GEMINI_UPSTREAM_UNAVAILABLE"
   | "GEMINI_REQUEST_REJECTED"
   | "OCR_RESULT_INVALID"
+  | "OCR_PAYLOAD_TOO_LARGE"
   | "OCR_INTERNAL_ERROR";
 
 const majors = new Set(["food", "home", "transport", "culture", "misc", "salary", "gain", "windfall"]);
-const geminiModels = [
-  "gemini-1.5-flash",
-  "gemini-1.5-pro",
-  "gemini-2.0-flash-exp"
-] as const;
+const imageDataUrlPattern = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/]+={0,2})$/;
+const geminiModels = ["gemini-2.5-flash", "gemini-2.0-flash"] as const;
+const MAX_SAFE_IMAGE_DATA_URL_LENGTH = 1_800_000;
+const GEMINI_REQUEST_TIMEOUT_MS = 20_000;
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -71,7 +71,6 @@ function validateResult(value: unknown) {
 }
 
 function modelJson(text: string) {
-  if (!text) return null;
   const stripped = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
   const objectText = stripped.match(/\{[\s\S]*\}/)?.[0] ?? stripped;
   try {
@@ -98,6 +97,16 @@ function geminiFailure(res: ResponseLike, status: number) {
   return sendError(res, 502, "GEMINI_REQUEST_REJECTED", `觀圖析字服務拒絕此次請求（${status}），請換一張清晰且完整的憑據照片再試。`);
 }
 
+async function fetchGemini(input: string, init: RequestInit) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), GEMINI_REQUEST_TIMEOUT_MS);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 export default async function handler(req: RequestLike, res: ResponseLike) {
   if (req.method !== "POST") return sendError(res, 405, "METHOD_NOT_ALLOWED", "只接受 POST 請求。");
 
@@ -105,15 +114,9 @@ export default async function handler(req: RequestLike, res: ResponseLike) {
     const body = parseRequestBody(req.body);
     const accessToken = typeof body?.accessToken === "string" ? body.accessToken : "";
     const imageDataUrl = typeof body?.imageDataUrl === "string" ? body.imageDataUrl : "";
-    
-    // 強化 Base64 解析容錯率，避免空格或換行字元干擾
-    const imageMatch = imageDataUrl.match(/^data:(image\/(?:jpeg|png|webp));base64,(.+)$/s);
-    if (accessToken.length < 20 || !imageMatch) {
-      return sendError(res, 400, "INVALID_INPUT", "影像或登入憑證格式無法辨識，請重新登入後再試。");
-    }
-
-    const mimeType = imageMatch[1];
-    const base64Data = imageMatch[2].trim().replace(/\s/g, "");
+    const imageMatch = imageDataUrl.match(imageDataUrlPattern);
+    if (accessToken.length < 20 || !imageMatch) return sendError(res, 400, "INVALID_INPUT", "影像或登入憑證格式無法辨識，請重新登入後再試。");
+    if (imageDataUrl.length > MAX_SAFE_IMAGE_DATA_URL_LENGTH) return sendError(res, 413, "OCR_PAYLOAD_TOO_LARGE", "照片整理後仍超過可安全傳送的大小，請靠近憑據重拍或裁去周遭背景後再試。");
 
     const supabaseUrl = process.env.VITE_SUPABASE_URL;
     const supabaseKey = process.env.VITE_SUPABASE_PUBLISHABLE_KEY;
@@ -129,8 +132,8 @@ export default async function handler(req: RequestLike, res: ResponseLike) {
 
     const requestBody = JSON.stringify({
       contents: [{ parts: [
-        { text: "簡短辨讀這張台灣發票，只回覆極簡 JSON，不要思考過程，不要 markdown。欄位：seller_name、invoice_number、invoice_date（YYYY-MM-DD）、random_code、total_amount、confidence（0 到 1）、items。items 每項包含 title、quantity、unit_price、amount、major（僅 food、home、transport、culture、misc、salary、gain、windfall 之一或 null）、tags（字串陣列）。看不清的欄位使用空字串、0 或 null。" },
-        { inline_data: { mime_type: mimeType, data: base64Data } },
+        { text: "請辨讀這張台灣消費憑據，只回覆 JSON，不要 markdown。欄位：seller_name、invoice_number、invoice_date（YYYY-MM-DD）、random_code、total_amount、confidence（0 到 1）、items。items 每項包含 title、quantity、unit_price、amount、major（僅 food、home、transport、culture、misc、salary、gain、windfall 之一或 null）、tags（字串陣列）。看不清的欄位使用空字串、0 或 null。" },
+        { inline_data: { mime_type: imageMatch[1], data: imageMatch[2] } },
       ] }],
       generationConfig: { responseMimeType: "application/json", temperature: 0.1 },
     });
@@ -139,11 +142,16 @@ export default async function handler(req: RequestLike, res: ResponseLike) {
     let responseStatus = 0;
     let responseOk = false;
     for (const model of geminiModels) {
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(geminiKey)}`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: requestBody,
-      });
+      let response: Response;
+      try {
+        response = await fetchGemini(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(geminiKey)}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: requestBody,
+        });
+      } catch {
+        return sendError(res, 502, "GEMINI_UPSTREAM_UNAVAILABLE", "觀圖析字服務暫時無法回應，請稍後再試或改用手動憑據。");
+      }
       responseStatus = response.status;
       responseText = await response.text();
       responseOk = response.ok;
@@ -154,7 +162,6 @@ export default async function handler(req: RequestLike, res: ResponseLike) {
     const payload = modelJson(responseText) as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> } | null;
     const raw = payload?.candidates?.[0]?.content?.parts?.find(part => typeof part.text === "string")?.text;
     const result = typeof raw === "string" ? validateResult(modelJson(raw)) : null;
-
     if (!result) return sendError(res, 502, "OCR_RESULT_INVALID", "觀圖析字結果格式不完整，請改用手動憑據。");
     return send(res, 200, result);
   } catch (error) {

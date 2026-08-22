@@ -26,7 +26,8 @@ const emptyItem = (handlerId: string): DraftItem => ({ key: crypto.randomUUID(),
 const fieldClass = "w-full rounded-xl border border-vellum-200 bg-vellum-50 px-3.5 py-2.5 text-sm text-ink-700 outline-none transition placeholder:text-ink-500/55 focus:border-moss-500 focus:ring-2 focus:ring-moss-100";
 const metaFieldClass = "w-full sm:w-[15rem]";
 const MAX_OCR_SOURCE_BYTES = 12_000_000;
-const MAX_OCR_DATA_URL_LENGTH = 2_200_000;
+// Vercel Functions 的 request body 上限為 4.5 MB；保留足夠餘裕給 JSON 與行動網路傳輸。
+const MAX_OCR_DATA_URL_LENGTH = 1_800_000;
 
 function loadReceiptImage(file: File) {
   return new Promise<HTMLImageElement>((resolve, reject) => {
@@ -49,7 +50,7 @@ async function prepareOcrImage(file: File) {
   if (file.size > MAX_OCR_SOURCE_BYTES) throw new Error("照片檔案過大，請拍攝完整憑據後再試，或先裁去周遭背景。");
 
   const image = await loadReceiptImage(file);
-  for (const maximumEdge of [2048, 1760, 1440]) {
+  for (const maximumEdge of [1600, 1440, 1280]) {
     const scale = Math.min(1, maximumEdge / Math.max(image.naturalWidth, image.naturalHeight));
     const width = Math.max(1, Math.round(image.naturalWidth * scale));
     const height = Math.max(1, Math.round(image.naturalHeight * scale));
@@ -61,7 +62,7 @@ async function prepareOcrImage(file: File) {
     context.fillStyle = "#ffffff";
     context.fillRect(0, 0, width, height);
     context.drawImage(image, 0, 0, width, height);
-    for (const quality of [0.86, 0.74, 0.62]) {
+    for (const quality of [0.78, 0.65, 0.52]) {
       const dataUrl = canvas.toDataURL("image/jpeg", quality);
       if (dataUrl.length <= MAX_OCR_DATA_URL_LENGTH) return dataUrl;
     }
@@ -83,6 +84,8 @@ function displayOcrError(error: unknown) {
     GEMINI_UPSTREAM_UNAVAILABLE: "觀圖析字服務暫時無法回應，請稍後重試。",
     GEMINI_REQUEST_REJECTED: "此照片未被辨讀服務接受，請改拍完整、清晰且光線充足的憑據。",
     OCR_RESULT_INVALID: "照片已有回應但內容不完整，請換一張較清晰的憑據或改用手動憑據。",
+    OCR_PAYLOAD_TOO_LARGE: "照片整理後仍超過可安全傳送的大小，請靠近憑據重拍或裁去周遭背景後再試。",
+    OCR_NETWORK_UNAVAILABLE: "手機與觀圖析字服務的連線暫時中斷，已自動重試一次仍未成功；請確認網路後再試。",
   };
   if (code && guidance[code]) return guidance[code];
   if (/Unexpected token|not valid JSON|page could not be found|expected pattern/i.test(message)) {
@@ -92,23 +95,37 @@ function displayOcrError(error: unknown) {
 }
 
 async function requestOcr(accessToken: string, imageDataUrl: string): Promise<OcrResult> {
-  const response = await fetch("/api/ocr", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ accessToken, imageDataUrl }),
-  });
-  const responseText = await response.text();
-  let body: OcrErrorBody | OcrResult;
-  try {
-    body = JSON.parse(responseText) as { message?: string } | OcrResult;
-  } catch {
-    throw new Error("觀圖析字服務回傳了無法辨讀的內容，請稍後重試。", { cause: responseText.slice(0, 180) });
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const response = await fetch("/api/ocr", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ accessToken, imageDataUrl }),
+        cache: "no-store",
+      });
+      const responseText = await response.text();
+      let body: OcrErrorBody | OcrResult;
+      try {
+        body = JSON.parse(responseText) as { message?: string } | OcrResult;
+      } catch {
+        throw new Error("觀圖析字服務回傳了無法辨讀的內容，請稍後重試。", { cause: responseText.slice(0, 180) });
+      }
+      if (!response.ok) {
+        const errorBody = body as OcrErrorBody;
+        throw new OcrRequestError(errorBody.message || "觀圖析字服務暫時無法完成。", errorBody.code);
+      }
+      return body as OcrResult;
+    } catch (error) {
+      const isNetworkFailure = error instanceof TypeError && /load failed|failed to fetch|networkerror/i.test(error.message);
+      if (!isNetworkFailure) throw error;
+      if (attempt === 0) {
+        await new Promise(resolve => window.setTimeout(resolve, 700));
+        continue;
+      }
+      throw new OcrRequestError("觀圖析字連線在重試後仍未完成。", "OCR_NETWORK_UNAVAILABLE");
+    }
   }
-  if (!response.ok) {
-    const errorBody = body as OcrErrorBody;
-    throw new OcrRequestError(errorBody.message || "觀圖析字服務暫時無法完成。", errorBody.code);
-  }
-  return body as OcrResult;
+  throw new OcrRequestError("觀圖析字連線暫時無法完成。", "OCR_NETWORK_UNAVAILABLE");
 }
 
 export function InvoiceIntake({
